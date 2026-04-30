@@ -1,6 +1,6 @@
-# Gestalt Bench
+# GesBench
 
-This repository contains data preparation, multimodal model inference, eye-tracking extraction, human annotation extraction, and analysis code for Gestalt Bench experiments.
+This repository contains data preparation, multimodal model inference, eye-tracking extraction, human annotation extraction, and analysis code for GesBench experiments.
 
 The scripts are designed to run either directly or through Slurm job wrappers in `job_scripts/`. Most job scripts use environment-variable based paths so the repository can be moved between systems without editing hardcoded local paths.
 
@@ -101,3 +101,23 @@ See [experiments/analysis/README.md](experiments/analysis/README.md) for the met
 3. Extract human annotations and, when needed, eye-tracking focus data.
 4. Generate gaze-corrupted task-2 data and run inference on those manipulated clips.
 5. Run analysis scripts to compute similarities, semantic turnover metrics, tables, and plots.
+
+## References
+
+We thank the following works for making this repo and paper possible:
+
+Models
+- Xu, Jin, et al. "Qwen3-omni technical report." arXiv preprint arXiv:2509.17765 (2025). [https://huggingface.co/Qwen/Qwen2.5-Omni-7B]
+- AI, Inclusion, et al. "Ming-omni: A unified multimodal model for perception and generation." arXiv preprint arXiv:2506.09344 (2025). [https://huggingface.co/inclusionAI/Ming-Lite-Omni]
+- Team, Gemma, et al. "Gemma: Open models based on gemini research and technology." arXiv preprint arXiv:2403.08295 (2024). [https://huggingface.co/google/gemma-4-E4B-it]
+- Team, Gemini, et al. "Gemini: a family of highly capable multimodal models." arXiv preprint arXiv:2312.11805 (2023). [https://ai.google.dev/gemini-api/docs]
+
+Datasets
+- Poria, Soujanya, et al. "Meld: A multimodal multi-party dataset for emotion recognition in conversations." Proceedings of the 57th annual meeting of the association for computational linguistics. 2019.
+- Zhang, Hanlei, et al. "Mintrec2. 0: A large-scale benchmark dataset for multimodal intent recognition and out-of-scope detection in conversations." arXiv preprint arXiv:2403.10943 (2024).
+- Ellingsen, Gunnar, and Eric Monteiro. "Seamless integration: standardisation across multiple local settings." Computer Supported Cooperative Work (CSCW) 15.5 (2006): 443-466. [https://ai.meta.com/research/seamless-interaction/]
+<!--
+Add references for external tools, models, datasets, and papers used in this repository.
+Format: [N] Authors. "Title." Venue, Year. URL
+-->
+
