@@ -1,0 +1,455 @@
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Iterator, List, Tuple
+
+
+TIME_TOLERANCE_SECONDS = 0.5
+RESPONSE_SELECTION_CHOICES = ("latest-submitted", "first-response")
+
+
+@dataclass
+class VideoTiming:
+    video_number: int
+    annotation_key: int
+    video_start_time: str | None
+    video_end_time: str | None
+    video_path: str | None
+    audio_path: str | None
+    video_length: float | None
+    current_video_time: float | None
+    time_annot: float | None
+
+
+@dataclass
+class AnnotatorTimings:
+    annotator_number: int
+    node_id: str
+    global_unique_id: str | None
+    timings: List[VideoTiming]
+    response_selection: str = "latest-submitted"
+    response_index: int | None = None
+    response_created: str | None = None
+    response_submitted: bool | None = None
+
+
+@dataclass
+class SelectedResponse:
+    response_index: int
+    response: dict
+    created: str | None
+    submitted: bool
+
+
+def get_indexed_value(container: Any, index: int) -> Any:
+    if isinstance(container, list):
+        return container[index]
+    if isinstance(container, dict):
+        return container[str(index)]
+    raise TypeError(f"Expected list or dict, got {type(container).__name__}.")
+
+
+def iter_indexed_values(container: Any) -> Iterator[Tuple[int, Any]]:
+    if isinstance(container, list):
+        for index, value in enumerate(container):
+            yield index, value
+        return
+    if isinstance(container, dict):
+        for index, key in enumerate(sorted(
+            container,
+            key=lambda item: (0, int(item)) if str(item).isdigit() else (1, str(item)),
+        )):
+            yield index, container[key]
+        return
+    raise TypeError(f"Expected list or dict, got {type(container).__name__}.")
+
+
+def get_first_node_id(journey_entry: dict) -> str:
+    nodes = journey_entry["nodes"]
+    return str(get_indexed_value(nodes, 0))
+
+
+def get_annotator_node_ids(payload: dict) -> List[Tuple[int, str, str | None]]:
+    journeys = payload.get("journeys", payload.get("journey"))
+    if journeys is None:
+        raise KeyError("Annotation JSON must contain a journeys field.")
+
+    annotators = []
+    for journey_index, journey_entry in iter_indexed_values(journeys):
+        annotators.append(
+            (
+                journey_index + 1,
+                get_first_node_id(journey_entry),
+                journey_entry.get("global_unique_id"),
+            )
+        )
+    return annotators
+
+
+def submitted_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() == "true"
+    return False
+
+
+def parse_created_timestamp(value: Any) -> datetime:
+    if value is None:
+        return datetime.min
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(float(value))
+    text = str(value).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+        return parsed.replace(tzinfo=None)
+    except ValueError:
+        logging.warning("Could not parse response created timestamp: %s", value)
+        return datetime.min
+
+
+def select_first_response(responses: Any, node_id: str) -> SelectedResponse | None:
+    try:
+        response = get_indexed_value(responses, 0)
+    except (KeyError, IndexError, TypeError) as exc:
+        logging.warning("nodes -> %s has no responses[0]; skipping annotator: %s", node_id, exc)
+        return None
+    if not isinstance(response, dict):
+        logging.warning("nodes -> %s -> responses -> 0 is not a dict; skipping.", node_id)
+        return None
+    return SelectedResponse(
+        response_index=0,
+        response=response,
+        created=None if response.get("created") is None else str(response.get("created")),
+        submitted=submitted_flag(response.get("submitted")),
+    )
+
+
+def select_latest_submitted_response(responses: Any, node_id: str) -> SelectedResponse | None:
+    submitted_responses = []
+    for response_index, response in iter_indexed_values(responses):
+        if not isinstance(response, dict):
+            logging.warning(
+                "nodes -> %s -> responses -> %s is not a dict; skipping.",
+                node_id,
+                response_index,
+            )
+            continue
+        if submitted_flag(response.get("submitted")):
+            submitted_responses.append(
+                (
+                    parse_created_timestamp(response.get("created")),
+                    response_index,
+                    response,
+                )
+            )
+
+    if not submitted_responses:
+        logging.warning("nodes -> %s has no submitted=True response; skipping annotator.", node_id)
+        return None
+
+    submitted_responses.sort(key=lambda item: (item[0], item[1]))
+    _, response_index, response = submitted_responses[-1]
+    return SelectedResponse(
+        response_index=response_index,
+        response=response,
+        created=None if response.get("created") is None else str(response.get("created")),
+        submitted=submitted_flag(response.get("submitted")),
+    )
+
+
+def select_response(
+    responses: Any,
+    node_id: str,
+    response_selection: str,
+) -> SelectedResponse | None:
+    if response_selection == "latest-submitted":
+        return select_latest_submitted_response(responses, node_id)
+    if response_selection == "first-response":
+        return select_first_response(responses, node_id)
+    raise ValueError(f"Unsupported response selection: {response_selection}")
+
+
+def get_annotations(
+    payload: dict,
+    node_id: str,
+    response_selection: str = "latest-submitted",
+) -> Tuple[dict, SelectedResponse] | None:
+    node = payload["nodes"][node_id]
+    responses = node["responses"]
+    selected_response = select_response(responses, node_id, response_selection)
+    if selected_response is None:
+        return None
+    annotations = selected_response.response["annotations"]
+    if not isinstance(annotations, dict):
+        raise TypeError(
+            f"nodes -> {node_id} -> selected response -> annotations must be a dict."
+        )
+    return annotations, selected_response
+
+
+def sorted_annotation_items(annotations: dict) -> List[Tuple[int, Any]]:
+    items = [(int(key), value) for key, value in annotations.items()]
+    keys = [key for key, _ in items]
+    if keys != sorted(keys):
+        logging.error("annotation keys are not in ascending order: %s", keys)
+    return sorted(items, key=lambda item: item[0])
+
+
+def iter_press_data(node: Any) -> Iterator[dict]:
+    if isinstance(node, dict):
+        press_data = node.get("press_data")
+        if isinstance(press_data, dict):
+            sibling_fields = {
+                key: value
+                for key, value in node.items()
+                if key != "press_data" and not isinstance(value, (dict, list))
+            }
+            yield {**press_data, **sibling_fields}
+        for value in node.values():
+            yield from iter_press_data(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from iter_press_data(value)
+
+
+def parse_timestamp(value: str) -> datetime:
+    return datetime.fromisoformat(value)
+
+
+def parse_optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def select_latest_press_data(annotation_key: int, annotation: dict) -> dict | None:
+    candidates = list(iter_press_data(annotation.get("data", {})))
+    if not candidates:
+        logging.error("annotation %s has no press_data entry under data.", annotation_key)
+        return None
+    if len(candidates) > 1:
+        logging.warning(
+            "annotation %s has %s press_data entries; using the latest time_annot.",
+            annotation_key,
+            len(candidates),
+        )
+    return max(
+        candidates,
+        key=lambda item: (
+            time_annot
+            if (time_annot := parse_optional_float(item.get("time_annot"))) is not None
+            else -1.0
+        ),
+    )
+
+
+def parse_video_timings(
+    annotations: dict,
+    tolerance: float,
+    annotator_number: int,
+    node_id: str | None = None,
+) -> List[VideoTiming]:
+    timings = []
+    for video_number, (annotation_key, annotation) in enumerate(sorted_annotation_items(annotations)):
+        press_data = select_latest_press_data(annotation_key, annotation)
+        if press_data is None:
+            timings.append(
+                VideoTiming(
+                    video_number=video_number,
+                    annotation_key=annotation_key,
+                    video_start_time=None,
+                    video_end_time=None,
+                    video_path=None,
+                    audio_path=None,
+                    video_length=None,
+                    current_video_time=None,
+                    time_annot=None,
+                )
+            )
+            continue
+
+        start_raw = press_data["video_start_time"]
+        end_raw = press_data["video_end_time"]
+        if not isinstance(start_raw, str) or not isinstance(end_raw, str):
+            logging.warning(
+                "Skipping annotation with invalid timestamp type: annotator=%s node=%s "
+                "annotation_key=%s video_number=%s "
+                "video_start_time_type=%s video_start_time=%r "
+                "video_end_time_type=%s video_end_time=%r",
+                annotator_number,
+                node_id,
+                annotation_key,
+                video_number,
+                type(start_raw).__name__,
+                start_raw,
+                type(end_raw).__name__,
+                end_raw,
+            )
+            timings.append(
+                VideoTiming(
+                    video_number=video_number,
+                    annotation_key=annotation_key,
+                    video_start_time=None,
+                    video_end_time=None,
+                    video_path=None if press_data.get("video_path") is None else str(press_data.get("video_path")),
+                    audio_path=None if press_data.get("audio_path") is None else str(press_data.get("audio_path")),
+                    video_length=None,
+                    current_video_time=parse_optional_float(press_data.get("current_video_time")),
+                    time_annot=parse_optional_float(press_data.get("time_annot")),
+                )
+            )
+            continue
+        video_length = (parse_timestamp(end_raw) - parse_timestamp(start_raw)).total_seconds()
+        video_path = press_data.get("video_path")
+        audio_path = press_data.get("audio_path")
+        current_video_time = parse_optional_float(press_data.get("current_video_time"))
+        time_annot = parse_optional_float(press_data.get("time_annot"))
+
+        if current_video_time is None:
+            logging.error(
+                "annotator %s annotation %s is missing a valid current_video_time.",
+                annotator_number,
+                annotation_key,
+            )
+        elif abs(video_length - current_video_time) > tolerance:
+            logging.error(
+                "annotator %s annotation %s duration mismatch: "
+                "end-start=%.3fs, current_video_time=%.3fs.",
+                annotator_number,
+                annotation_key,
+                video_length,
+                current_video_time,
+            )
+
+        timings.append(
+            VideoTiming(
+                video_number=video_number,
+                annotation_key=annotation_key,
+                video_start_time=start_raw,
+                video_end_time=end_raw,
+                video_path=None if video_path is None else str(video_path),
+                audio_path=None if audio_path is None else str(audio_path),
+                video_length=video_length,
+                current_video_time=current_video_time,
+                time_annot=time_annot,
+            )
+        )
+    return timings
+
+
+def load_all_video_timings(
+    json_path: Path,
+    tolerance: float,
+    response_selection: str = "latest-submitted",
+) -> List[AnnotatorTimings]:
+    with json_path.open("r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    all_timings = []
+    for annotator_number, node_id, global_unique_id in get_annotator_node_ids(payload):
+        selected = get_annotations(payload, node_id, response_selection)
+        if selected is None:
+            continue
+        annotations, selected_response = selected
+        print(
+            f"Annotator {annotator_number}: node {node_id}, "
+            f"response {selected_response.response_index}, "
+            f"videos under annotations: {len(annotations)}"
+        )
+        all_timings.append(
+            AnnotatorTimings(
+                annotator_number=annotator_number,
+                node_id=node_id,
+                global_unique_id=global_unique_id,
+                response_selection=response_selection,
+                response_index=selected_response.response_index,
+                response_created=selected_response.created,
+                response_submitted=selected_response.submitted,
+                timings=parse_video_timings(
+                    annotations,
+                    tolerance,
+                    annotator_number,
+                    node_id=node_id,
+                ),
+            )
+        )
+    return all_timings
+
+
+def print_timing_table(annotator_timings: AnnotatorTimings) -> None:
+    timings = annotator_timings.timings
+    print()
+    print(
+        f"Annotator {annotator_timings.annotator_number} "
+        f"(node {annotator_timings.node_id}, {annotator_timings.global_unique_id}, "
+        f"response_selection={annotator_timings.response_selection}, "
+        f"response_index={annotator_timings.response_index})"
+    )
+    headers = ("video", "video_start_time", "video_end_time", "video_length")
+    rows = [
+        (
+            str(timing.video_number),
+            str(timing.video_start_time),
+            str(timing.video_end_time),
+            "None" if timing.video_length is None else f"{timing.video_length:.3f}",
+        )
+        for timing in timings
+    ]
+    widths = [
+        max(len(headers[idx]), *(len(row[idx]) for row in rows)) if rows else len(headers[idx])
+        for idx in range(len(headers))
+    ]
+    print("  ".join(header.ljust(widths[idx]) for idx, header in enumerate(headers)))
+    print("  ".join("-" * width for width in widths))
+    for row in rows:
+        print("  ".join(value.ljust(widths[idx]) for idx, value in enumerate(row)))
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Read video time intervals from an annotation JSON and print timing tables."
+    )
+    parser.add_argument("annotation_json", type=Path, help="Path to the annotation JSON file.")
+    parser.add_argument(
+        "--duration-tolerance",
+        type=float,
+        default=TIME_TOLERANCE_SECONDS,
+        help="Allowed seconds of difference between end-start and current_video_time.",
+    )
+    parser.add_argument(
+        "--response-selection",
+        choices=RESPONSE_SELECTION_CHOICES,
+        default="latest-submitted",
+        help=(
+            "Which response to read from each annotator node. "
+            "'first-response' matches the 64b3e28 behavior."
+        ),
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    args = parse_args()
+    all_timings = load_all_video_timings(
+        args.annotation_json,
+        args.duration_tolerance,
+        response_selection=args.response_selection,
+    )
+    for annotator_timings in all_timings:
+        print_timing_table(annotator_timings)
+
+
+if __name__ == "__main__":
+    main()

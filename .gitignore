@@ -1,0 +1,11 @@
+**/model_logs
+**/results
+.idea/
+**/cluster_raw
+**/local
+**/__pycache__
+.vscode/
+**/api_keys/
+data/
+**.sif
+/data
