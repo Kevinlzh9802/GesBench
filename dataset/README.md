@@ -1,6 +1,6 @@
 # Dataset Utilities
 
-This directory contains the data preparation utilities used by the repository. The two main workflows are dialogue partitioning and human-evaluation sample selection.
+This directory contains the data preparation utilities used GesBench. The two main workflows are dialogue partitioning and human-evaluation sample selection.
 
 Set these paths before running the Slurm wrappers:
 
@@ -15,6 +15,40 @@ Create the Slurm log directory before submitting from the repository root:
 ```bash
 mkdir -p logs
 ```
+
+## Preparing Cumulative Video Clips(CVCs) in GesBench
+Under `DATA_ROOT`, put 3 folders: 
+- `meld/raw`, and its contents are downloaded from MELD official resources [https://affective-meld.github.io/]. After extraction, please use their utterances under `raw/003` folder.
+- `mintrec/raw`, and its contents are directly derived by MintRec2.0 official data source. Please use everything under `in-scope/raw` folder. [https://github.com/thuiar/MIntRec2.0#Download]
+- `seamless_interaction/raw`. Please first download the first 3 batches [https://github.com/facebookresearch/seamless_interaction/blob/main/scripts/download_hf.py#L38], select the natural conversation part into a staging folder such as `${DATA_ROOT}/seamless_interaction/downloaded_raw`, and then construct the final utterance clips under `seamless_interaction/raw`.
+
+  To create utterance clips named like `dia1_utt1.mp4`, `dia1_utt2.mp4`, and so on, first group the raw participant-centric files into dyadic interaction folders with `seamless_construct_interaction.py`:
+
+  ```bash
+  python dataset/seamless_construct_interaction.py \
+      --data-root ${DATA_ROOT}/seamless_interaction/downloaded_raw \
+      --filelist /path/to/seamless_interaction/assets/filelist.csv \
+      --interactions /path/to/seamless_interaction/assets/interactions.csv \
+      --label naturalistic \
+      --batches 0 1 2 \
+      --out-root ${DATA_ROOT}/seamless_interaction/interactions \
+      --link-mode symlink \
+      --strict-two-person
+  ```
+
+  Then split the grouped interactions into utterance-level clips with `seamless_construct_utterance.py`:
+
+  ```bash
+  python dataset/seamless_construct_utterance.py \
+      --grouped-root ${DATA_ROOT}/seamless_interaction/interactions \
+      --out-root ${DATA_ROOT}/seamless_interaction/raw \
+      --mode transcript \
+      --min-clip-duration 1.5 \
+      --overwrite
+  ```
+
+  The second command writes flat clips under `${DATA_ROOT}/seamless_interaction/raw` using the `dia<dialogue_id>_utt<utterance_id>.mp4` naming convention expected by `dialogue_partition.py`, plus per-dialogue metadata in `${DATA_ROOT}/seamless_interaction/raw/dialogue_info/`.
+
 
 ## Dialogue Partitioning
 
